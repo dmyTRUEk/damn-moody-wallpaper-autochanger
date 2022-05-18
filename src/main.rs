@@ -2,9 +2,8 @@
 
 use std::env::{args, self};
 use std::f32::consts::TAU;
-use std::io::Error;
-use std::path::{Path, PathBuf};
-use std::process::{Command, exit, Output};
+use std::path::Path;
+use std::process::{Command, exit as sys_exit};
 use std::thread;
 use std::time;
 
@@ -15,6 +14,7 @@ use walkdir::WalkDir;
 
 
 
+#[derive(Clone, Copy)]
 enum DEWM {
     // Desktop Environments
     Budgie,
@@ -35,6 +35,64 @@ enum DEWM {
     Sway,
     Wayfire,
     Xmonad,
+}
+
+
+
+fn get_de_wm() -> DEWM {
+    let xdg_current_desktop: String = match env::var("XDG_CURRENT_DESKTOP") {
+        Ok(val) => { val }
+        Err(_e) => { panic!("environment variable XDG_CURRENT_DESKTOP not found") }
+    };
+    // println!("xdg_current_desktop = {xdg_current_desktop}");
+    match xdg_current_desktop {
+        _ if xdg_current_desktop.ends_with("GNOME") => {
+            DEWM::Gnome
+        }
+        _ if xdg_current_desktop.ends_with("SWAY") => {
+            todo!("Check is this is correct way to check if this is sway");
+            DEWM::Sway
+        }
+        _ => { todo!() }
+    }
+}
+
+
+
+fn set_wallpaper(dewm: DEWM, path_str: &str) {
+    assert!(path_str.len() > 0);
+    if Path::new(path_str).is_file() == false {
+        println!("File unavailable: {path_str}");
+        // exit("File unavailable");
+    }
+    match dewm {
+        DEWM::Gnome => {
+            let res = Command::new("gsettings")
+                .env("GSETTINGS_BACKEND", "dconf")
+                .arg("set")
+                .arg("org.gnome.desktop.background")
+                .arg("picture-uri")
+                .arg(format!("file://{path_str}"))
+                .output();
+            if res.is_err() {
+                exit("Error while executing command to set GNOME light wallpaper");
+            }
+            let res = Command::new("gsettings")
+                .env("GSETTINGS_BACKEND", "dconf")
+                .arg("set")
+                .arg("org.gnome.desktop.background")
+                .arg("picture-uri-dark")
+                .arg(format!("file://{path_str}"))
+                .output();
+            if res.is_err() {
+                exit("Error while executing command to set GNOME dark wallpaper");
+            }
+        }
+        DEWM::Sway => {
+            todo!()
+        }
+        _ => { todo!() }
+    }
 }
 
 
@@ -98,7 +156,7 @@ fn generate_brightness_by_gauss(desired_brightness: f32) -> f32 {
     random_brightness.unwrap()
 }
 
-fn smart_choose(wallpapers: &Vec<Wallpaper>) -> Wallpaper {
+fn smart_choose(wallpapers: &Vec<Wallpaper>) -> &Wallpaper {
     assert!(wallpapers.len() > 0);
     let desired_brightness: f32 = time_to_desired_brightness(chrono::Local::now().time());
     println!("desired_brightness: {desired_brightness}");
@@ -112,63 +170,13 @@ fn smart_choose(wallpapers: &Vec<Wallpaper>) -> Wallpaper {
             closest_i = i;
         }
     }
-    wallpapers[closest_i].clone()
+    &wallpapers[closest_i]
 }
 
 
 
-fn get_de_wm() -> DEWM {
-    let xdg_current_desktop: String = match env::var("XDG_CURRENT_DESKTOP") {
-        Ok(val) => { val }
-        Err(_e) => { panic!() }
-    };
-    // println!("xdg_current_desktop = {xdg_current_desktop}");
-    match xdg_current_desktop {
-        _ if xdg_current_desktop.ends_with("GNOME") => {
-            DEWM::Gnome
-        }
-        _ if xdg_current_desktop.ends_with("SWAY") => {
-            todo!("Check is this is correct way to check if this is sway");
-            DEWM::Sway
-        }
-        _ => { todo!() }
-    }
-}
-
-
-
-fn set_wallpaper(path: &Path) -> Result<Output, Error> {
-    assert!(path.to_str().unwrap().len() > 0);
-    assert!(path.is_file());
-    match get_de_wm() {
-        DEWM::Gnome => {
-            let path_str: String = path.display().to_string();
-            Command::new("gsettings")
-                .env("GSETTINGS_BACKEND", "dconf")
-                .arg("set")
-                .arg("org.gnome.desktop.background")
-                .arg("picture-uri")
-                .arg(format!("file://{path_str}"))
-                .output()?;
-            Command::new("gsettings")
-                .env("GSETTINGS_BACKEND", "dconf")
-                .arg("set")
-                .arg("org.gnome.desktop.background")
-                .arg("picture-uri-dark")
-                .arg(format!("file://{path_str}"))
-                .output()
-        }
-        DEWM::Sway => {
-            todo!()
-        }
-        _ => { todo!() }
-    }
-}
-
-
-
-fn calc_image_brightness(path: &PathBuf) -> Option<f32> {
-    let image = image::open(path);
+fn calc_image_brightness(path_str: &str) -> Option<f32> {
+    let image = image::open(path_str);
     if image.is_err() { return None; }
     let image = image.unwrap();
     let mut brightness: u64 = 0;
@@ -194,36 +202,43 @@ struct Wallpaper {
 #[derive(Debug)]
 struct Config {
     delay: Option<u32>,
-    wallpapers_path: Option<PathBuf>,
     wallpapers: Vec<Wallpaper>,
 }
 impl Config {
     fn new() -> Self {
         Config {
             delay: None,
-            wallpapers_path: None,
             wallpapers: vec![],
         }
     }
 
-    fn init_wallpapers(&mut self) {
-        for entry in WalkDir::new(self.wallpapers_path.clone().unwrap()) {
-            if entry.as_ref().unwrap().path().is_dir() { continue; }
-            let path: PathBuf = entry.as_ref().unwrap().path().to_path_buf();
-            let brightness: Option<f32> = calc_image_brightness(&path);
+    fn load_wallpapers(&mut self, path_str: &str) {
+        for entry in WalkDir::new(path_str) {
+            let path: &Path = entry.as_ref().unwrap().path();
+            if path.is_dir() { continue; }
+            let path_str: String = path.display().to_string();
+            let brightness: Option<f32> = calc_image_brightness(&path_str);
             if brightness.is_none() {
-                let path_str: String = path.display().to_string();
+                let path_str: String = path_str;
                 println!("Skipping {path_str}");
                 continue;
             }
             let brightness: f32 = brightness.unwrap();
-            println!("{}", path.display().to_string());
+            println!("{}", path_str);
             println!("brightness = {brightness}");
-            self.wallpapers.push(Wallpaper { path_str: path.display().to_string(), brightness });
+            let mut wallpaper: Wallpaper = Wallpaper { path_str, brightness };
+            wallpaper.path_str.shrink_to_fit();
+            self.wallpapers.push(wallpaper);
         }
     }
 }
 
+
+
+fn exit(msg: &str) {
+    println!("{msg}");
+    sys_exit(1);
+}
 
 
 fn generate_config_from_args() -> Config {
@@ -261,18 +276,18 @@ fn generate_config_from_args() -> Config {
                         .to_string();
                     path_str = "/home/".to_string() + &user_name + &path_str[1..];
                 }
-                let path: &Path = Path::new(&path_str);
-                assert!(path.is_dir());
-                config.wallpapers_path = Some(path.to_path_buf());
+                if Path::new(&path_str).is_dir() == false {
+                    exit("Provided path is not a valid dir.");
+                }
+                println!("Loading wallpapers from {path_str}");
+                config.load_wallpapers(&path_str);
             }
             _ => {
-                println!("Unkown arg: `{arg}`");
-                exit(1);
+                exit(&format!("Unkown arg: `{arg}`"));
             }
         }
     }
-    println!("Initing wallpapers...");
-    config.init_wallpapers();
+    config.wallpapers.shrink_to_fit();
     config
 }
 
@@ -282,11 +297,13 @@ fn main() {
     let config: Config = generate_config_from_args();
     println!("config = {config:#?}\n");
 
+    let dewm: DEWM = get_de_wm();
+
     loop {
         println!();
-        let random_wallpaper: &Wallpaper = &smart_choose(&config.wallpapers);
+        let random_wallpaper: &Wallpaper = smart_choose(&config.wallpapers);
         println!("Setting wallpaper: {path_str}", path_str=random_wallpaper.path_str);
-        set_wallpaper(Path::new(&random_wallpaper.path_str)).unwrap();
+        set_wallpaper(dewm, &random_wallpaper.path_str);
         println!("Sleeping {d}s...", d=config.delay.unwrap());
         thread::sleep(time::Duration::from_secs(config.delay.unwrap() as u64));
     }

@@ -131,7 +131,7 @@ dependencies = [
 
 [[package]]
 name = "damn_moody_wallpaper_autochanger"
-version = "0.0.1"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "image",

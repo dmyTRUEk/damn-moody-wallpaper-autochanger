@@ -1,7 +1,14 @@
 [package]
 edition = "2021"
 name = "damn_moody_wallpaper_autochanger"
-version = "0.1.0"
+version = "0.1.1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+overflow-checks = false
 
 [dependencies]
 chrono = "*"

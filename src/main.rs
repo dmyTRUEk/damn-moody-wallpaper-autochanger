@@ -4,7 +4,7 @@ use std::env::{args, self};
 use std::f32::consts::TAU;
 use std::io::Error;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, exit, Output};
 use std::thread;
 use std::time;
 
@@ -16,6 +16,7 @@ use walkdir::WalkDir;
 
 
 enum DEWM {
+    // Desktop Environments
     Budgie,
     Cinnamon,
     Deepin,
@@ -25,7 +26,7 @@ enum DEWM {
     Lxqt,
     Mate,
     Xfce,
-
+    // Window Managers
     Awesome,
     Bspwm,
     Dwm,
@@ -49,6 +50,7 @@ impl ExtensionVecU8ToString for Vec<u8> {
 
 
 
+/// random number from gauss distribution
 fn random_gauss(mu: f32, sigma: f32) -> f32 {
     // from python's `random.gauss`:
     // When x and y are two variables from [0, 1), uniformly distributed, then
@@ -85,11 +87,7 @@ fn time_to_desired_brightness(time: NaiveTime) -> f32 {
 
 
 
-fn smart_choose(wallpapers: &Vec<Wallpaper>) -> Wallpaper {
-    assert!(wallpapers.len() > 0);
-    let desired_brightness: f32 = time_to_desired_brightness(chrono::Local::now().time());
-    println!("desired_brightness: {desired_brightness}");
-
+fn generate_brightness_by_gauss(desired_brightness: f32) -> f32 {
     let mut random_brightness: Option<f32> = None;
     while random_brightness.is_none() {
         let rb: f32 = random_gauss(desired_brightness, desired_brightness/2.0);
@@ -97,7 +95,15 @@ fn smart_choose(wallpapers: &Vec<Wallpaper>) -> Wallpaper {
             random_brightness = Some(rb);
         }
     }
-    let random_brightness: f32 = random_brightness.unwrap();
+    random_brightness.unwrap()
+}
+
+fn smart_choose(wallpapers: &Vec<Wallpaper>) -> Wallpaper {
+    assert!(wallpapers.len() > 0);
+    let desired_brightness: f32 = time_to_desired_brightness(chrono::Local::now().time());
+    println!("desired_brightness: {desired_brightness}");
+
+    let random_brightness: f32 = generate_brightness_by_gauss(desired_brightness);
     println!("random_brightness: {random_brightness}");
 
     let mut closest_i: usize = 0;
@@ -159,6 +165,8 @@ fn set_wallpaper(path: &Path) -> Result<Output, Error> {
     }
 }
 
+
+
 fn calc_image_brightness(path: &PathBuf) -> Option<f32> {
     let image = image::open(path);
     if image.is_err() { return None; }
@@ -173,11 +181,15 @@ fn calc_image_brightness(path: &PathBuf) -> Option<f32> {
     Some((brightness as f64 / (4.0 * 255.0 * image.dimensions().0 as f64 * image.dimensions().1 as f64)) as f32)
 }
 
+
+
 #[derive(Clone, Debug)]
 struct Wallpaper {
-    path: PathBuf,
+    path_str: String,
     brightness: f32,
 }
+
+
 
 #[derive(Debug)]
 struct Config {
@@ -207,12 +219,14 @@ impl Config {
             let brightness: f32 = brightness.unwrap();
             println!("{}", path.display().to_string());
             println!("brightness = {brightness}");
-            self.wallpapers.push(Wallpaper { path, brightness });
+            self.wallpapers.push(Wallpaper { path_str: path.display().to_string(), brightness });
         }
     }
 }
 
-fn main() {
+
+
+fn generate_config_from_args() -> Config {
     let args: Vec<String> = args().collect::<Vec<String>>()[1..].to_vec();
 
     const ARG_DELAY_SHORT: &str = "-d=";
@@ -253,23 +267,27 @@ fn main() {
             }
             _ => {
                 println!("Unkown arg: `{arg}`");
-                return;
+                exit(1);
             }
         }
     }
-
-    println!("config = {config:#?}\n");
-
     println!("Initing wallpapers...");
     config.init_wallpapers();
+    config
+}
+
+
+
+fn main() {
+    let config: Config = generate_config_from_args();
+    println!("config = {config:#?}\n");
 
     loop {
         println!();
         let random_wallpaper: &Wallpaper = &smart_choose(&config.wallpapers);
-        let path_str: String = random_wallpaper.path.display().to_string();
-        println!("Setting wallpaper: {path_str}");
-        set_wallpaper(&random_wallpaper.path).unwrap();
-        println!("Slepping {d}s...", d=config.delay.unwrap());
+        println!("Setting wallpaper: {path_str}", path_str=random_wallpaper.path_str);
+        set_wallpaper(Path::new(&random_wallpaper.path_str)).unwrap();
+        println!("Sleeping {d}s...", d=config.delay.unwrap());
         thread::sleep(time::Duration::from_secs(config.delay.unwrap() as u64));
     }
 }

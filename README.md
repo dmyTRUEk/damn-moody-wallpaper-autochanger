@@ -12,6 +12,7 @@
 ## Configuration:
 - Delay: `-d` or `--delay`, examples: `-d=30s`, `-d=5m`, `--delay=2h`.
 - Wallpaper path: `-p` or `--path=`, example: `-p=~/Pictures/Wallpapers/`.
+- Silent (no output): `-s` or `--silent`.
 
 ## Interaction:
 - Skip this wallpaper by sending `SIGINT` signal to program, like this:

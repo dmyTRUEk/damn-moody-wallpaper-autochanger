@@ -1,9 +1,9 @@
 /// damn moody wallpaper autochanger
 
 use std::path::Path;
-use std::process::Command;
-use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, atomic::Ordering::SeqCst};
+use std::process::{Command, exit};
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
 
 
 
@@ -52,11 +52,13 @@ fn get_dewm() -> DEWM {
 
 
 
-fn set_wallpaper(dewm: DEWM, path_str: &str) {
+fn set_wallpaper(dewm: DEWM, path_str: &str, silent: bool) -> Result<(), Error> {
     assert!(path_str.len() > 0);
     if Path::new(path_str).is_file() == false {
-        println!("File unavailable: {path_str}");
-        // exit("File unavailable");
+        if !silent {
+            println!("File unavailable: {path_str}");
+        }
+        return Err(Error::FileUnavaible);
     }
     match dewm {
         DEWM::Gnome => {
@@ -68,7 +70,8 @@ fn set_wallpaper(dewm: DEWM, path_str: &str) {
                 .arg(format!("file://{path_str}"))
                 .output();
             if res.is_err() {
-                exit("Error while executing command to set GNOME light wallpaper");
+                println!("Error while executing command to set GNOME light wallpaper");
+                exit(1);
             }
             let res = Command::new("gsettings")
                 .env("GSETTINGS_BACKEND", "dconf")
@@ -78,7 +81,8 @@ fn set_wallpaper(dewm: DEWM, path_str: &str) {
                 .arg(format!("file://{path_str}"))
                 .output();
             if res.is_err() {
-                exit("Error while executing command to set GNOME dark wallpaper");
+                println!("Error while executing command to set GNOME dark wallpaper");
+                exit(1);
             }
         }
         DEWM::Sway => {
@@ -86,6 +90,7 @@ fn set_wallpaper(dewm: DEWM, path_str: &str) {
         }
         _ => { todo!() }
     }
+    Ok(())
 }
 
 
@@ -97,6 +102,14 @@ impl ExtensionVecU8ToString for Vec<u8> {
     fn to_string(self) -> String {
         String::from_utf8(self).unwrap()
     }
+}
+
+
+
+#[derive(Debug, PartialEq)]
+enum Error {
+    FileUnavaible,
+    UnableToOpenFileAsImage,
 }
 
 
@@ -150,15 +163,20 @@ fn generate_brightness_by_gauss(desired_brightness: f32) -> f32 {
     random_brightness.unwrap()
 }
 
-fn smart_choose(wallpapers: &Vec<Wallpaper>) -> &Wallpaper {
+fn smart_choose(wallpapers: &Vec<Wallpaper>, silent: bool) -> &Wallpaper {
     assert!(wallpapers.len() > 0);
+
     use chrono::Timelike;
-    let now_time = chrono::Local::now().time();
-    let desired_brightness: f32 = time_to_desired_brightness(now_time.hour(), now_time.minute());
-    println!("desired_brightness: {desired_brightness}");
+    let now = chrono::Local::now().time();
+    let desired_brightness: f32 = time_to_desired_brightness(now.hour(), now.minute());
+    if !silent {
+        println!("desired_brightness: {desired_brightness}");
+    }
 
     let random_brightness: f32 = generate_brightness_by_gauss(desired_brightness);
-    println!("random_brightness: {random_brightness}");
+    if !silent {
+        println!("random_brightness: {random_brightness}");
+    }
 
     let mut closest_i: usize = 0;
     for i in 0..wallpapers.len() {
@@ -171,10 +189,10 @@ fn smart_choose(wallpapers: &Vec<Wallpaper>) -> &Wallpaper {
 
 
 
-fn calc_image_brightness(path_str: &str) -> Option<f32> {
+fn calc_image_brightness(path_str: &str) -> Result<f32, Error> {
     use image::GenericImageView;
     let image = image::open(path_str);
-    if image.is_err() { return None; }
+    if image.is_err() { return Err(Error::UnableToOpenFileAsImage); }
     let image = image.unwrap();
     let mut brightness: u64 = 0;
     for (_w, _h, pixel) in image.pixels() {
@@ -183,7 +201,7 @@ fn calc_image_brightness(path_str: &str) -> Option<f32> {
         brightness += pixel.0[2] as u64; // blue
         // brightness += pixel.0[3] as u64; // alpha
     }
-    Some((brightness as f64 / (4.0 * 255.0 * image.dimensions().0 as f64 * image.dimensions().1 as f64)) as f32)
+    Ok((brightness as f64 / (3.0 * 255.0 * image.dimensions().0 as f64 * image.dimensions().1 as f64)) as f32)
 }
 
 
@@ -198,48 +216,58 @@ struct Wallpaper {
 
 #[derive(Debug)]
 struct Config {
+    silent: bool,
     dewm: Option<DEWM>,
     delay: Option<u32>,
+    paths_str: Vec<String>,
     wallpapers: Vec<Wallpaper>,
 }
 impl Config {
     fn new() -> Self {
         Config {
+            silent: false,
             dewm: None,
             delay: None,
+            paths_str: vec![],
             wallpapers: vec![],
         }
     }
 
-    fn load_wallpapers(&mut self, path_str: &str) {
+    fn load_wallpapers(&mut self) {
         use walkdir::WalkDir;
-        for entry in WalkDir::new(path_str) {
-            let path: &Path = entry.as_ref().unwrap().path();
-            if path.is_dir() { continue; }
-            let path_str: String = path.display().to_string();
-            let brightness: Option<f32> = calc_image_brightness(&path_str);
-            if brightness.is_none() {
-                let path_str: String = path_str;
-                println!("Skipping {path_str}");
-                continue;
+        self.wallpapers = vec![];
+        for path_str in &self.paths_str {
+            if !self.silent {
+                println!("Loading wallpapers from {path_str}");
             }
-            let brightness: f32 = brightness.unwrap();
-            println!("{}", path_str);
-            println!("brightness = {brightness}");
-            let mut wallpaper: Wallpaper = Wallpaper { path_str, brightness };
-            wallpaper.path_str.shrink_to_fit();
-            self.wallpapers.push(wallpaper);
+            for entry in WalkDir::new(path_str) {
+                let path: &Path = entry.as_ref().unwrap().path();
+                if path.is_dir() { continue; }
+                let path_str: String = path.display().to_string();
+                let brightness: Result<f32, Error> = calc_image_brightness(&path_str);
+                match brightness {
+                    Err(Error::UnableToOpenFileAsImage) => {
+                        let path_str: String = path_str;
+                        if !self.silent {
+                            println!("Unable to open file as image: {path_str}");
+                        }
+                    }
+                    Ok(brightness) => {
+                        if !self.silent {
+                            println!("Loading {path_str}");
+                            println!("brightness = {brightness}");
+                        }
+                        let mut wallpaper: Wallpaper = Wallpaper { path_str, brightness };
+                        wallpaper.path_str.shrink_to_fit();
+                        self.wallpapers.push(wallpaper);
+                    }
+                    Err(_) => { unreachable!() }
+                }
+            }
         }
     }
 }
 
-
-
-fn exit(msg: &str) {
-    use std::process::exit;
-    println!("{msg}");
-    exit(1);
-}
 
 
 fn generate_config_from_args() -> Config {
@@ -250,6 +278,9 @@ fn generate_config_from_args() -> Config {
 
     const ARG_PATH_SHORT: &str = "-p=";
     const ARG_PATH_LONG: &str = "--path=";
+
+    const ARG_SILENT_SHORT: &str = "-s";
+    const ARG_SILENT_LONG: &str = "--silent";
 
     let mut config: Config = Config::new();
 
@@ -281,26 +312,34 @@ fn generate_config_from_args() -> Config {
                     path_str = "/home/".to_string() + &user_name + &path_str[1..];
                 }
                 if Path::new(&path_str).is_dir() == false {
-                    exit("Provided path is not a valid dir.");
+                    println!("Provided path is not a valid directory.");
+                    exit(1);
                 }
-                println!("Loading wallpapers from {path_str}");
-                config.load_wallpapers(&path_str);
+                config.paths_str.push(path_str);
+            }
+            _ if arg == ARG_SILENT_SHORT || arg == ARG_SILENT_LONG => {
+                config.silent = true;
             }
             _ => {
-                exit(&format!("Unkown arg: `{arg}`"));
+                println!("Unkown arg: `{arg}`");
+                exit(1);
             }
         }
     }
     config.wallpapers.shrink_to_fit();
+    config.load_wallpapers();
     config
 }
 
 
 
-fn choose_and_set_wallpaper(config: &Config) {
-    let random_wallpaper: &Wallpaper = smart_choose(&config.wallpapers);
-    println!("Setting wallpaper: {path_str}", path_str=random_wallpaper.path_str);
-    set_wallpaper(config.dewm.unwrap(), &random_wallpaper.path_str);
+fn choose_and_set_wallpaper(config: &Config) -> Result<(), Error> {
+    let random_wallpaper: &Wallpaper = smart_choose(&config.wallpapers, config.silent);
+    if !config.silent {
+        println!("Wallpaper brightness: {}", random_wallpaper.brightness);
+        println!("Setting wallpaper: {path_str}", path_str=random_wallpaper.path_str);
+    }
+    set_wallpaper(config.dewm.unwrap(), &random_wallpaper.path_str, config.silent)
 }
 
 
@@ -311,40 +350,69 @@ fn main() {
     let file = xdg_dirs.place_config_file("damn-moody-wallpaper-autochanger").unwrap();
     let instance_a = single_instance::SingleInstance::new(file.to_str().unwrap()).unwrap();
     if !instance_a.is_single() {
-        exit("Only one instance of damn-moody-wallpaper-autochanger at a time allowed, exiting this instance.");
+        println!("Only one instance of damn-moody-wallpaper-autochanger at a time allowed, exiting this instance.");
+        exit(1);
     }
 
-    let config_arc: Arc<Config> = Arc::new(generate_config_from_args());
-    let config_arc_loop = config_arc.clone();
-    println!("config = {config:#?}\n", config=config_arc_loop);
+    // shared variables:
+    let config: Arc<Mutex<Config>> = Arc::new(Mutex::new(generate_config_from_args()));
+    let skip: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
-    let skip_am: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+    fn update_wallpapers(c: &mut Config) {
+        if !c.silent {
+            println!("Rescanning wallpapers...");
+        }
+        c.load_wallpapers();
+    }
 
-    {
-        let config_arc_handle = config_arc.clone();
-        let skip_amc_handle = skip_am.clone();
-        ctrlc::set_handler(move || {
-            skip_amc_handle.store(true, SeqCst);
+    let config_handle = config.clone();
+    let skip_handle = skip.clone();
+    ctrlc::set_handler(move || {
+        skip_handle.store(true, SeqCst);
+        let config: &mut Config = &mut config_handle.lock().unwrap();
+        if !config.silent {
             println!();
-            println!("SIGINT handled.");
-            choose_and_set_wallpaper(&config_arc_handle);
-        })
-        .expect("Can't set Ctrl+C handler.");
-    }
+            println!("Setting wallpaper from SIGINT handler.");
+        }
+        let res = choose_and_set_wallpaper(&config);
+        match res {
+            Err(Error::FileUnavaible) => { update_wallpapers(config) }
+            Err(_) => { unreachable!() }
+            _ => {}
+        }
+    }).expect("Can't set Ctrl+C (SIGINT) handler.");
 
-    let skip_amc_loop = skip_am.clone();
+    let config_loop = config.clone();
+    let skip_loop = skip.clone();
     loop {
-        println!();
-        let config: &Config = &config_arc_loop;
-        if skip_amc_loop.load(SeqCst) == false {
-            choose_and_set_wallpaper(&config);
+        let (delay, silent): (u64, bool) = {
+            let config: &mut Config = &mut config_loop.lock().unwrap();
+            if !config.silent {
+                println!();
+            }
+            if skip_loop.load(SeqCst) == false {
+                if !config.silent {
+                    println!("Setting wallpaper from loop.");
+                }
+                let res = choose_and_set_wallpaper(&config);
+                match res {
+                    Err(Error::FileUnavaible) => { update_wallpapers(config) }
+                    Err(_) => { unreachable!() }
+                    _ => {}
+                }
+            }
+            else {
+                if !config.silent {
+                    println!("Wallpaper was set from SIGINT handler, skipping this iteration.");
+                }
+                skip_loop.store(false, SeqCst);
+            }
+            (config.delay.unwrap() as u64, config.silent)
+        };
+        if !silent {
+            println!("Sleeping {delay}s...");
         }
-        else {
-            println!("Wallpaper was set from SIGINT, skipping this iteration...");
-            skip_amc_loop.store(false, SeqCst);
-        }
-        println!("Sleeping {d}s...", d=&config.delay.unwrap());
-        std::thread::sleep(std::time::Duration::from_secs(config.delay.unwrap() as u64));
+        std::thread::sleep(std::time::Duration::from_secs(delay as u64));
     }
 }
 

@@ -1,20 +1,13 @@
 /// damn moody wallpaper autochanger
 
-use std::env::{args, self};
-use std::f32::consts::TAU;
 use std::path::Path;
-use std::process::{Command, exit as sys_exit};
-use std::thread;
-use std::time;
-
-use chrono::{NaiveTime, Timelike};
-use image::GenericImageView;
-use rand::{Rng, thread_rng};
-use walkdir::WalkDir;
+use std::process::Command;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, atomic::Ordering::SeqCst};
 
 
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum DEWM {
     // Desktop Environments
     Budgie,
@@ -39,8 +32,8 @@ enum DEWM {
 
 
 
-fn get_de_wm() -> DEWM {
-    let xdg_current_desktop: String = match env::var("XDG_CURRENT_DESKTOP") {
+fn get_dewm() -> DEWM {
+    let xdg_current_desktop: String = match std::env::var("XDG_CURRENT_DESKTOP") {
         Ok(val) => { val }
         Err(_e) => { panic!("environment variable XDG_CURRENT_DESKTOP not found") }
     };
@@ -115,6 +108,8 @@ fn random_gauss(mu: f32, sigma: f32) -> f32 {
     // cos(2*pi*x)*sqrt(-2*ln(1-y))
     // sin(2*pi*x)*sqrt(-2*ln(1-y))
     // are two *independent* variables with normal distribution (mu=0, sigma=1).
+    use std::f32::consts::TAU;
+    use rand::{Rng, thread_rng};
     let mut rng = thread_rng();
     let x: f32 = rng.gen_range(0.0..1.0);
     let y: f32 = rng.gen_range(0.0..1.0);
@@ -124,8 +119,7 @@ fn random_gauss(mu: f32, sigma: f32) -> f32 {
 
 
 
-fn time_to_desired_brightness(time: NaiveTime) -> f32 {
-    let hour = time.hour();
+fn time_to_desired_brightness(hour: u32, _minute: u32) -> f32 {
     match hour {
         _ if (5 <= hour && hour < 21) => { // day
             0.7
@@ -158,7 +152,9 @@ fn generate_brightness_by_gauss(desired_brightness: f32) -> f32 {
 
 fn smart_choose(wallpapers: &Vec<Wallpaper>) -> &Wallpaper {
     assert!(wallpapers.len() > 0);
-    let desired_brightness: f32 = time_to_desired_brightness(chrono::Local::now().time());
+    use chrono::Timelike;
+    let now_time = chrono::Local::now().time();
+    let desired_brightness: f32 = time_to_desired_brightness(now_time.hour(), now_time.minute());
     println!("desired_brightness: {desired_brightness}");
 
     let random_brightness: f32 = generate_brightness_by_gauss(desired_brightness);
@@ -176,6 +172,7 @@ fn smart_choose(wallpapers: &Vec<Wallpaper>) -> &Wallpaper {
 
 
 fn calc_image_brightness(path_str: &str) -> Option<f32> {
+    use image::GenericImageView;
     let image = image::open(path_str);
     if image.is_err() { return None; }
     let image = image.unwrap();
@@ -201,18 +198,21 @@ struct Wallpaper {
 
 #[derive(Debug)]
 struct Config {
+    dewm: Option<DEWM>,
     delay: Option<u32>,
     wallpapers: Vec<Wallpaper>,
 }
 impl Config {
     fn new() -> Self {
         Config {
+            dewm: None,
             delay: None,
             wallpapers: vec![],
         }
     }
 
     fn load_wallpapers(&mut self, path_str: &str) {
+        use walkdir::WalkDir;
         for entry in WalkDir::new(path_str) {
             let path: &Path = entry.as_ref().unwrap().path();
             if path.is_dir() { continue; }
@@ -236,13 +236,14 @@ impl Config {
 
 
 fn exit(msg: &str) {
+    use std::process::exit;
     println!("{msg}");
-    sys_exit(1);
+    exit(1);
 }
 
 
 fn generate_config_from_args() -> Config {
-    let args: Vec<String> = args().collect::<Vec<String>>()[1..].to_vec();
+    let args: Vec<String> = std::env::args().collect::<Vec<String>>()[1..].to_vec();
 
     const ARG_DELAY_SHORT: &str = "-d=";
     const ARG_DELAY_LONG: &str = "--delay=";
@@ -251,6 +252,9 @@ fn generate_config_from_args() -> Config {
     const ARG_PATH_LONG: &str = "--path=";
 
     let mut config: Config = Config::new();
+
+    config.dewm = Some(get_dewm());
+
     for arg in args {
         match arg {
             arg_delay if arg.starts_with(ARG_DELAY_SHORT) || arg.starts_with(ARG_DELAY_LONG) => {
@@ -293,19 +297,54 @@ fn generate_config_from_args() -> Config {
 
 
 
+fn choose_and_set_wallpaper(config: &Config) {
+    let random_wallpaper: &Wallpaper = smart_choose(&config.wallpapers);
+    println!("Setting wallpaper: {path_str}", path_str=random_wallpaper.path_str);
+    set_wallpaper(config.dewm.unwrap(), &random_wallpaper.path_str);
+}
+
+
+
 fn main() {
-    let config: Config = generate_config_from_args();
-    println!("config = {config:#?}\n");
+    // check if only one instance
+    let xdg_dirs = xdg::BaseDirectories::new().unwrap();
+    let file = xdg_dirs.place_config_file("damn-moody-wallpaper-autochanger").unwrap();
+    let instance_a = single_instance::SingleInstance::new(file.to_str().unwrap()).unwrap();
+    if !instance_a.is_single() {
+        exit("Only one instance of damn-moody-wallpaper-autochanger at a time allowed, exiting this instance.");
+    }
 
-    let dewm: DEWM = get_de_wm();
+    let config_arc: Arc<Config> = Arc::new(generate_config_from_args());
+    let config_arc_loop = config_arc.clone();
+    println!("config = {config:#?}\n", config=config_arc_loop);
 
+    let skip_am: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+
+    {
+        let config_arc_handle = config_arc.clone();
+        let skip_amc_handle = skip_am.clone();
+        ctrlc::set_handler(move || {
+            skip_amc_handle.store(true, SeqCst);
+            println!();
+            println!("SIGINT handled.");
+            choose_and_set_wallpaper(&config_arc_handle);
+        })
+        .expect("Can't set Ctrl+C handler.");
+    }
+
+    let skip_amc_loop = skip_am.clone();
     loop {
         println!();
-        let random_wallpaper: &Wallpaper = smart_choose(&config.wallpapers);
-        println!("Setting wallpaper: {path_str}", path_str=random_wallpaper.path_str);
-        set_wallpaper(dewm, &random_wallpaper.path_str);
-        println!("Sleeping {d}s...", d=config.delay.unwrap());
-        thread::sleep(time::Duration::from_secs(config.delay.unwrap() as u64));
+        let config: &Config = &config_arc_loop;
+        if skip_amc_loop.load(SeqCst) == false {
+            choose_and_set_wallpaper(&config);
+        }
+        else {
+            println!("Wallpaper was set from SIGINT, skipping this iteration...");
+            skip_amc_loop.store(false, SeqCst);
+        }
+        println!("Sleeping {d}s...", d=&config.delay.unwrap());
+        std::thread::sleep(std::time::Duration::from_secs(config.delay.unwrap() as u64));
     }
 }
 

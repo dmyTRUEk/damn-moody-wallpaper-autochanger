@@ -347,7 +347,7 @@ fn choose_and_set_wallpaper(config: &Config) -> Result<(), Error> {
 fn main() {
     // check if only one instance
     let xdg_dirs = xdg::BaseDirectories::new().unwrap();
-    let file = xdg_dirs.place_config_file("damn-moody-wallpaper-autochanger").unwrap();
+    let file = xdg_dirs.place_config_file("damn-moody-wallpaper-autochanger.lock").unwrap();
     let instance_a = single_instance::SingleInstance::new(file.to_str().unwrap()).unwrap();
     if !instance_a.is_single() {
         println!("Only one instance of damn-moody-wallpaper-autochanger at a time allowed, exiting this instance.");

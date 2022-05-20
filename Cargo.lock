@@ -147,7 +147,7 @@ dependencies = [
 
 [[package]]
 name = "damn-moody-wallpaper-autochanger"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "chrono",
  "ctrlc",
